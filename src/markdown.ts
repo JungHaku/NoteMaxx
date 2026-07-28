@@ -48,6 +48,20 @@ function blockToMd(b: Block, num: number): string {
   }
 }
 
+export function blocksToMarkdown(blocks: Block[], lead = ''): string {
+  let out = lead;
+  let num = 0;
+  let prevList = false;
+  for (const b of blocks) {
+    num = b.type === 'number' ? num + 1 : 0;
+    const isList = LIST_TYPES.has(b.type);
+    const sep = out === '' ? '' : isList && prevList ? '\n' : '\n\n';
+    out += sep + blockToMd(b, num);
+    prevList = isList;
+  }
+  return out.trimEnd() + '\n';
+}
+
 export function pageToMarkdown(page: Page): string {
   let out = `# ${page.title || 'Untitled'}`;
   let num = 0;

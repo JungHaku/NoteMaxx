@@ -41,6 +41,7 @@ Note: the native app's WKWebView has its own localStorage, separate from any bro
 - **Pages sidebar** — pin, delete, full-text search across titles and content
 - **Quick switcher** — ⌘K (or ⌘P) to jump to any page by title or content, or create a page from the query
 - **Block reordering** — drag the ⋮⋮ handle in the left gutter, or ⌘⇧↑ / ⌘⇧↓ to move the current block
+- **Multi-block selection** — drag across blocks (or shift-click, or ⌘A twice) to select whole blocks; ⌘C copies them as Markdown, Backspace deletes them, Escape clears
 - **Duplicate page** — hover a page in the sidebar and hit the copy icon; full deep copy, independently editable
 - **Copy as Markdown** — topbar button copies the whole page as Markdown (headings, lists, `- [ ]` to-dos, code fences)
 - **Autosave** — debounced to localStorage, ~250ms after last keystroke

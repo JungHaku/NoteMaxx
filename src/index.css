@@ -479,6 +479,32 @@ button {
   position: relative;
 }
 
+/* whole-block selection (crossing a block boundary) */
+.blocks.sel-mode,
+.blocks.sel-mode * {
+  user-select: none;
+}
+
+.block-row.block-selected {
+  background: rgba(45, 114, 210, 0.16);
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px rgba(45, 114, 210, 0.16);
+}
+
+.sel-clip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  outline: none;
+  opacity: 0;
+  resize: none;
+  pointer-events: none;
+}
+
 .drag-handle {
   position: absolute;
   left: -26px;

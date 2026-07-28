@@ -3,6 +3,7 @@ import { GripVertical } from 'lucide-react';
 import { Block, BlockType, Page } from '../types';
 import { uid } from '../storage';
 import { TEMPLATES, Template } from '../templates';
+import { blocksToMarkdown } from '../markdown';
 import BlockView from './BlockView';
 import SlashMenu, { SlashCommand, filterCommands } from './SlashMenu';
 
@@ -108,6 +109,14 @@ export default function Editor({ page, onChange }: Props) {
   );
   const [drag, setDrag] = useState<{ id: string; overIndex: number; after: boolean } | null>(null);
   const blocksListRef = useRef<HTMLDivElement>(null);
+  // Blocks are separate contenteditable hosts, so the browser can't stretch one
+  // text selection across them. Crossing a block boundary switches to selecting
+  // whole blocks instead (Notion does the same).
+  const [selRange, setSelRange] = useState<{ anchor: number; head: number } | null>(null);
+  const selRangeRef = useRef(selRange);
+  const clipRef = useRef<HTMLTextAreaElement>(null);
+  const dragAnchor = useRef<number | null>(null);
+  const pointerDown = useRef(false);
 
   const register = (id: string, el: HTMLElement | null) => {
     if (el) blockEls.current.set(id, el);
@@ -361,6 +370,22 @@ export default function Editor({ page, onChange }: Props) {
     const block = page.blocks[i];
     const el = blockEls.current.get(id);
 
+    // ⌘A selects the block's text first; a second ⌘A escalates to all blocks.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'a') {
+      let whole = false;
+      if (el instanceof HTMLTextAreaElement) {
+        whole = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+      } else if (el) {
+        const sel = window.getSelection();
+        whole = block.text.length === 0 || (sel?.toString().length ?? 0) >= block.text.length;
+      }
+      if (whole) {
+        e.preventDefault();
+        selectAllBlocks();
+      }
+      return;
+    }
+
     if (
       (e.metaKey || e.ctrlKey) &&
       e.shiftKey &&
@@ -505,6 +530,115 @@ export default function Editor({ page, onChange }: Props) {
     minute: '2-digit',
   });
 
+  // ---- whole-block selection ----
+
+  const selBounds = selRange
+    ? ([Math.min(selRange.anchor, selRange.head), Math.max(selRange.anchor, selRange.head)] as const)
+    : null;
+  const selectedMd = selBounds
+    ? blocksToMarkdown(page.blocks.slice(selBounds[0], selBounds[1] + 1))
+    : '';
+
+  useEffect(() => {
+    selRangeRef.current = selRange;
+  }, [selRange]);
+
+  // Park focus (and a real text selection) in an offscreen textarea holding the
+  // selected blocks' markdown, so ⌘C / Edit▸Copy work natively.
+  const focusClip = () => {
+    const ta = clipRef.current;
+    if (!ta) return;
+    ta.focus({ preventScroll: true });
+    ta.select();
+  };
+
+  useEffect(() => {
+    if (selRange && !pointerDown.current) focusClip();
+  }, [selRange, selectedMd]);
+
+  useEffect(() => {
+    const onUp = () => {
+      pointerDown.current = false;
+      if (selRangeRef.current) focusClip();
+    };
+    document.addEventListener('mouseup', onUp);
+    return () => document.removeEventListener('mouseup', onUp);
+  }, []);
+
+  const rowIndexFrom = (target: EventTarget | null): number | null => {
+    if (!(target instanceof Element)) return null;
+    const row = target.closest('.block-row');
+    const raw = row?.getAttribute('data-index');
+    return raw == null ? null : Number(raw);
+  };
+
+  const focusedBlockIndex = (): number | null => {
+    const el = document.activeElement;
+    if (!(el instanceof Element)) return null;
+    return rowIndexFrom(el);
+  };
+
+  const clearSelection = (focusIndex?: number) => {
+    setSelRange(null);
+    if (focusIndex != null) {
+      const b = page.blocks[focusIndex];
+      if (b && b.type !== 'divider') focusIntent.current = { id: b.id, pos: 'end' };
+    }
+  };
+
+  const selectAllBlocks = () => {
+    if (page.blocks.length) setSelRange({ anchor: 0, head: page.blocks.length - 1 });
+  };
+
+  const deleteSelectedBlocks = () => {
+    if (!selBounds) return;
+    const [a, b] = selBounds;
+    const rest = page.blocks.filter((_, i) => i < a || i > b);
+    setSelRange(null);
+    if (rest.length === 0) {
+      const nb: Block = { id: uid(), type: 'p', text: '' };
+      onChange({ blocks: [nb] });
+      focusIntent.current = { id: nb.id, pos: 'start' };
+      return;
+    }
+    onChange({ blocks: rest });
+    const target = rest[Math.max(0, a - 1)];
+    if (target && target.type !== 'divider') focusIntent.current = { id: target.id, pos: 'end' };
+  };
+
+  // Write the markdown explicitly rather than trusting the textarea's own
+  // selection — this also covers the native app's Edit ▸ Copy menu item.
+  const handleClipCopy = (e: React.ClipboardEvent) => {
+    if (!selectedMd) return;
+    e.clipboardData.setData('text/plain', selectedMd);
+    e.preventDefault();
+  };
+
+  const handleClipKey = (e: React.KeyboardEvent) => {
+    if (!selBounds) return;
+    const [a, b] = selBounds;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      clearSelection(b);
+    } else if (e.key === 'Backspace' || e.key === 'Delete') {
+      e.preventDefault();
+      deleteSelectedBlocks();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      clearSelection(a);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      clearSelection(b);
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+      e.preventDefault();
+      selectAllBlocks();
+    } else if ((e.metaKey || e.ctrlKey) && e.key === 'x') {
+      e.preventDefault();
+      document.execCommand('copy'); // the clip textarea holds the real selection
+      deleteSelectedBlocks();
+    }
+  };
+
   // Dead-zone drag handling: the title/meta area and the tail below the last
   // block accept drops too, mapping to before-first / after-last.
   const deadZoneTarget = (e: React.DragEvent) => {
@@ -520,6 +654,37 @@ export default function Editor({ page, onChange }: Props) {
     <div className="editor-scroll">
       <div
         className="editor-page"
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          if (e.target instanceof Element && e.target.closest('.drag-handle')) return;
+          const idx = rowIndexFrom(e.target);
+          if (e.shiftKey && idx != null) {
+            const anchor = selRange ? selRange.anchor : focusedBlockIndex();
+            if (anchor != null && anchor !== idx) {
+              e.preventDefault();
+              setSelRange({ anchor, head: idx });
+              return;
+            }
+          }
+          dragAnchor.current = idx;
+          pointerDown.current = true;
+          if (selRange) setSelRange(null);
+        }}
+        onMouseMove={(e) => {
+          if (!pointerDown.current || dragAnchor.current == null) return;
+          if (e.buttons === 0) {
+            pointerDown.current = false;
+            return;
+          }
+          const idx = rowIndexFrom(e.target);
+          if (idx == null) return;
+          if (idx === dragAnchor.current) {
+            if (selRange) setSelRange(null);
+            return;
+          }
+          setSelRange({ anchor: dragAnchor.current, head: idx });
+          window.getSelection()?.removeAllRanges();
+        }}
         onDragOver={(e) => {
           if (!drag) return;
           if (e.target instanceof Element && e.target.closest('.block-row')) return;
@@ -572,13 +737,14 @@ export default function Editor({ page, onChange }: Props) {
           </div>
         )}
 
-        <div className="blocks" ref={blocksListRef}>
+        <div className={`blocks${selBounds ? ' sel-mode' : ''}`} ref={blocksListRef}>
           {page.blocks.map((b, i) => (
             <div
               className={`block-row${
                 drag && drag.overIndex === i ? (drag.after ? ' drop-below' : ' drop-above') : ''
-              }`}
+              }${selBounds && i >= selBounds[0] && i <= selBounds[1] ? ' block-selected' : ''}`}
               key={b.id}
+              data-index={i}
               onBlur={() => handleBlur(b.id)}
               onDragOver={(e) => {
                 if (!drag) return;
@@ -640,6 +806,19 @@ export default function Editor({ page, onChange }: Props) {
         </div>
 
         <div className="editor-tail" onClick={handleTailClick} aria-hidden="true" />
+
+        <textarea
+          ref={clipRef}
+          className="sel-clip"
+          value={selectedMd}
+          readOnly
+          tabIndex={-1}
+          aria-hidden="true"
+          onKeyDown={handleClipKey}
+          onCopy={handleClipCopy}
+          onCut={handleClipCopy}
+          onBlur={() => setSelRange(null)}
+        />
       </div>
     </div>
   );
