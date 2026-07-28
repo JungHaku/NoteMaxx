@@ -23,7 +23,7 @@ Build both the app and a shareable zip:
 npm run build:mac
 ```
 
-That writes `~/Desktop/NoteMaxx.app` and `release/NoteMaxx.zip` (~264 KB). Run it after changing either the web code or `macos/main.swift`.
+That writes `~/Desktop/NoteMaxx.app` and `release/NoteMaxx.zip` (~300 KB). Run it after changing either the web code or `macos/main.swift`. The binary is universal (arm64 + x86_64) so it runs on Intel Macs too; requires macOS 12+.
 
 To hack on the web code with HMR inside the app shell, run `npm run dev` and launch with `NOTEMAXX_DEV=1`. That loads `http://localhost:5190`, which is a different origin and so has its own separate notes.
 

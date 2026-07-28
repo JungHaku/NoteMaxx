@@ -13,7 +13,16 @@ npm run build
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O -swift-version 5 "$DIR/main.swift" -o "$APP/Contents/MacOS/NoteMaxx"
+# Universal binary — a recipient's Mac may be Intel, and a single-arch build
+# simply won't launch there.
+BUILD="$(mktemp -d)"
+trap 'rm -rf "$BUILD"' EXIT
+for arch in arm64 x86_64; do
+  swiftc -O -swift-version 5 -target "$arch-apple-macos12.0" \
+    "$DIR/main.swift" -o "$BUILD/NoteMaxx-$arch"
+done
+lipo -create "$BUILD/NoteMaxx-arm64" "$BUILD/NoteMaxx-x86_64" \
+  -output "$APP/Contents/MacOS/NoteMaxx"
 cp "$DIR/Info.plist" "$APP/Contents/Info.plist"
 cp "$DIR/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp -R "$ROOT/dist" "$APP/Contents/Resources/app"
