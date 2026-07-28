@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "deploy:app": "bash scripts/deploy-app.sh",
-    "build:mac": "bash macos/build.sh"
+    "build:mac": "bash macos/build.sh",
+    "deploy:web": "bash scripts/deploy-web.sh"
   },
   "dependencies": {
     "lucide-react": "^0.462.0",

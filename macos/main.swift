@@ -2,81 +2,157 @@ import AppKit
 import WebKit
 import Foundation
 
-let PORT = 5190
+// NoteMaxx is fully self-contained: the production web build lives inside the
+// app bundle at Contents/Resources/app, and a WKURLSchemeHandler serves it over
+// notemaxx://app/. No Node, no localhost port, no external files — the bundle is
+// the whole app, so it can be zipped and handed to someone else.
+//
+// A custom scheme (rather than file://) is what makes localStorage work: file://
+// pages get an opaque origin in WKWebView and localStorage throws.
+
+let SCHEME = "notemaxx"
+let HOST = "app"
+let START_URL = URL(string: "\(SCHEME)://\(HOST)/index.html")!
+let STORAGE_KEY = "notemaxx.pages.v1"
 
 let appSupportDir = FileManager.default
     .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     .appendingPathComponent("NoteMaxx")
 
-var serverProcess: Process?
+// MARK: - Serving the bundled build
 
-func portIsUp() -> Bool {
-    guard let url = URL(string: "http://localhost:\(PORT)/") else { return false }
-    var up = false
-    let sem = DispatchSemaphore(value: 0)
-    let req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 0.6)
-    URLSession.shared.dataTask(with: req) { _, resp, _ in
-        if let r = resp as? HTTPURLResponse, r.statusCode == 200 { up = true }
-        sem.signal()
-    }.resume()
-    sem.wait()
-    return up
+final class BundleSchemeHandler: NSObject, WKURLSchemeHandler {
+    private let root: URL
+    private var live = Set<ObjectIdentifier>()
+
+    init(root: URL) {
+        self.root = root.standardizedFileURL
+    }
+
+    private static let mimeTypes: [String: String] = [
+        "html": "text/html; charset=utf-8",
+        "js": "text/javascript; charset=utf-8",
+        "mjs": "text/javascript; charset=utf-8",
+        "css": "text/css; charset=utf-8",
+        "json": "application/json; charset=utf-8",
+        "svg": "image/svg+xml",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "ico": "image/x-icon",
+        "webp": "image/webp",
+        "woff": "font/woff",
+        "woff2": "font/woff2",
+        "ttf": "font/ttf",
+        "map": "application/json; charset=utf-8",
+        "webmanifest": "application/manifest+json",
+    ]
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        live.insert(ObjectIdentifier(task))
+
+        let path = task.request.url?.path ?? "/"
+        var file = root.appendingPathComponent(path.isEmpty || path == "/" ? "index.html" : path)
+            .standardizedFileURL
+
+        // Never let a crafted path escape the bundled app directory.
+        if file.path != root.path && !file.path.hasPrefix(root.path + "/") {
+            file = root.appendingPathComponent("index.html")
+        }
+
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: file.path, isDirectory: &isDir)
+        // SPA fallback: unknown routes render index.html.
+        if !exists || isDir.boolValue {
+            file = root.appendingPathComponent("index.html")
+        }
+
+        guard let data = try? Data(contentsOf: file) else {
+            finish(task, error: NSError(domain: NSURLErrorDomain, code: NSURLErrorFileDoesNotExist))
+            return
+        }
+
+        let ext = file.pathExtension.lowercased()
+        let mime = Self.mimeTypes[ext] ?? "application/octet-stream"
+        // Vite emits <script type="module" crossorigin>, which requests in CORS
+        // mode — without this header WebKit rejects it even same-origin.
+        let response = HTTPURLResponse(
+            url: task.request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": mime,
+                "Content-Length": String(data.count),
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache",
+            ]
+        )!
+
+        guard live.contains(ObjectIdentifier(task)) else { return }
+        task.didReceive(response)
+        task.didReceive(data)
+        finish(task, error: nil)
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
+        live.remove(ObjectIdentifier(task))
+    }
+
+    private func finish(_ task: WKURLSchemeTask, error: Error?) {
+        guard live.remove(ObjectIdentifier(task)) != nil else { return }
+        if let error { task.didFailWithError(error) } else { task.didFinish() }
+    }
 }
 
-func findNode() -> String? {
-    let candidates = ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
-    for c in candidates where FileManager.default.isExecutableFile(atPath: c) { return c }
-    return nil
+// MARK: - App
+
+// Imports notes from the pre-1.0 build, which served the app over
+// http://localhost:5190 and so stored them under a different origin. This has to
+// run at document start, before the app's own bootstrap seeds a welcome page and
+// makes the key non-empty. `legacy-notes.json` only exists on the machine the
+// notes were exported from, so elsewhere this returns nil and never runs.
+func legacyImportScript() -> WKUserScript? {
+    let legacy = appSupportDir.appendingPathComponent("legacy-notes.json")
+    guard let raw = try? String(contentsOf: legacy, encoding: .utf8),
+        let literal = try? String(data: JSONEncoder().encode(raw), encoding: .utf8)
+    else { return nil }
+
+    let js = """
+        (function () {
+          try {
+            if (!localStorage.getItem('\(STORAGE_KEY)')) {
+              localStorage.setItem('\(STORAGE_KEY)', \(literal));
+            }
+          } catch (e) {}
+        })();
+        """
+    return WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true)
 }
 
-// If nothing is serving the port (e.g. `npm run dev`), serve the production
-// build staged in ~/Library/Application Support/NoteMaxx. Desktop itself is
-// TCC-protected, so the server must run from outside it.
-func startServerIfNeeded() -> Bool {
-    if portIsUp() { return true }
-    guard let node = findNode() else { return false }
-    let serverJS = appSupportDir.appendingPathComponent("server.js")
-    let appDir = appSupportDir.appendingPathComponent("app")
-    guard FileManager.default.fileExists(atPath: serverJS.path),
-          FileManager.default.fileExists(atPath: appDir.appendingPathComponent("index.html").path)
-    else { return false }
-
-    let logURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/NoteMaxx.log")
-    if !FileManager.default.fileExists(atPath: logURL.path) {
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
-    }
-    let logHandle = try? FileHandle(forWritingTo: logURL)
-    logHandle?.seekToEndOfFile()
-
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: node)
-    p.arguments = [serverJS.path, appDir.path, String(PORT)]
-    p.currentDirectoryURL = URL(fileURLWithPath: "/")
-    if let h = logHandle {
-        p.standardOutput = h
-        p.standardError = h
-    }
-    do { try p.run() } catch { return false }
-    serverProcess = p
-    for _ in 0..<40 {
-        if portIsUp() { return true }
-        usleep(250_000)
-    }
-    return false
-}
-
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let serverReady = startServerIfNeeded()
+        guard let resourceRoot = Bundle.main.resourceURL?.appendingPathComponent("app"),
+            FileManager.default.fileExists(
+                atPath: resourceRoot.appendingPathComponent("index.html").path)
+        else {
+            fail("NoteMaxx is missing its web build. Rebuild it with `npm run build:mac`.")
+            return
+        }
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
+        config.setURLSchemeHandler(BundleSchemeHandler(root: resourceRoot), forURLScheme: SCHEME)
+        if let legacyImport = legacyImportScript() {
+            config.userContentController.addUserScript(legacyImport)
+        }
+
         webView = WKWebView(frame: .zero, configuration: config)
         webView.uiDelegate = self
+        webView.navigationDelegate = self
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
@@ -97,24 +173,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        if serverReady {
-            webView.load(URLRequest(url: URL(string: "http://localhost:\(PORT)/")!))
+        // NOTEMAXX_DEV=1 loads the Vite dev server instead, for hacking on the
+        // web code with HMR. Note it is a different origin, so it has its own
+        // separate notes.
+        if ProcessInfo.processInfo.environment["NOTEMAXX_DEV"] == "1",
+            let dev = URL(string: "http://localhost:5190/")
+        {
+            webView.load(URLRequest(url: dev))
         } else {
-            let alert = NSAlert()
-            alert.alertStyle = .critical
-            alert.messageText = "NoteMaxx could not start"
-            alert.informativeText =
-                "Missing node or the app build. Run `npm run deploy:app` in ~/Desktop/NoteMaxx, then relaunch."
-            alert.runModal()
-            NSApp.terminate(nil)
+            webView.load(URLRequest(url: START_URL))
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        serverProcess?.terminate()
+    private func fail(_ message: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "NoteMaxx could not start"
+        alert.informativeText = message
+        alert.runModal()
+        NSApp.terminate(nil)
     }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     @objc func reloadPage(_ sender: Any?) {
         webView.reload()

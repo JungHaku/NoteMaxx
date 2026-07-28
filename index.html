@@ -14,9 +14,23 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <meta name="theme-color" content="#1C2127" />
+    <meta name="description" content="A minimal, Notion-style notetaking app. Local-first." />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // Installable + offline when hosted over http(s). Skipped inside the
+      // macOS app, which runs on the notemaxx:// scheme where service workers
+      // are unavailable (and unnecessary — its assets are already local).
+      if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
