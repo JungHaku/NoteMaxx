@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { GripVertical } from 'lucide-react';
-import { Block, BlockType, Page } from '../types';
+import { Block, BlockType, FileRef, Page, isVoid } from '../types';
 import { uid } from '../storage';
 import { TEMPLATES, Template } from '../templates';
 import { blocksToMarkdown } from '../markdown';
+import { isImage, putFile } from '../files';
 import BlockView from './BlockView';
 import SlashMenu, { SlashCommand, filterCommands } from './SlashMenu';
 
@@ -88,6 +89,11 @@ function tryMarkdown(text: string): { type: BlockType; rest: string } | null {
 
 const LIST_TYPES: BlockType[] = ['bullet', 'number', 'todo'];
 
+// A drag carrying OS files, as opposed to an internal block reorder.
+function isExternalFileDrag(e: React.DragEvent): boolean {
+  return Array.from(e.dataTransfer.types ?? []).includes('Files');
+}
+
 const PLACEHOLDERS: Partial<Record<BlockType, string>> = {
   p: "Type '/' for commands",
   h1: 'Heading 1',
@@ -117,6 +123,7 @@ export default function Editor({ page, onChange }: Props) {
   const clipRef = useRef<HTMLTextAreaElement>(null);
   const dragAnchor = useRef<number | null>(null);
   const pointerDown = useRef(false);
+  const [fileHover, setFileHover] = useState(false);
 
   const register = (id: string, el: HTMLElement | null) => {
     if (el) blockEls.current.set(id, el);
@@ -155,7 +162,7 @@ export default function Editor({ page, onChange }: Props) {
     if (isFresh && !page.title) {
       titleRef.current?.focus();
     } else {
-      const first = page.blocks.find((b) => b.type !== 'divider');
+      const first = page.blocks.find((b) => !isVoid(b.type));
       if (first) focusEl(first.id, 'start');
     }
     setSlash(null);
@@ -231,11 +238,88 @@ export default function Editor({ page, onChange }: Props) {
       return;
     }
 
+    // Image/File open a picker; the block is replaced once bytes are chosen.
+    if (cmd.type === 'image' || cmd.type === 'file') {
+      if (el && !(el instanceof HTMLTextAreaElement)) el.textContent = '';
+      update(id, { text: '' });
+      pickTarget.current = { index: i, replace: true };
+      const input = fileInputRef.current;
+      if (input) {
+        input.accept = cmd.type === 'image' ? 'image/*' : '';
+        input.value = '';
+        input.click();
+      }
+      return;
+    }
+
     if (el && !(el instanceof HTMLTextAreaElement)) el.textContent = '';
     const patch: Partial<Block> = { type: cmd.type, text: '' };
     if (cmd.type === 'todo') patch.checked = false;
     update(id, patch);
     focusIntent.current = { id, pos: 'start' };
+  };
+
+  // ---- attachments ----
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pickTarget = useRef<{ index: number; replace: boolean } | null>(null);
+
+  const blockForFile = (ref: FileRef): Block => ({
+    id: uid(),
+    type: isImage(ref) ? 'image' : 'file',
+    text: '',
+    file: ref,
+  });
+
+  const insertFiles = async (files: FileList | File[], at: { index: number; replace: boolean }) => {
+    const list = Array.from(files);
+    if (!list.length) return;
+
+    const refs: FileRef[] = [];
+    for (const f of list) {
+      try {
+        refs.push(await putFile(f));
+      } catch {
+        window.alert(`Could not store "${f.name}" — the browser's storage may be full.`);
+      }
+    }
+    if (!refs.length) return;
+
+    const made = refs.map(blockForFile);
+    const blocks = [...page.blocks];
+    const idx = Math.min(Math.max(at.index, 0), blocks.length - 1);
+    const target = blocks[idx];
+    // Replace the block we were invoked from if it is still an empty paragraph.
+    const replaceIt = at.replace && !!target && target.type === 'p' && target.text === '';
+    blocks.splice(replaceIt ? idx : idx + 1, replaceIt ? 1 : 0, ...made);
+
+    // Always leave an editable block after the attachments to type into.
+    const afterIdx = (replaceIt ? idx : idx + 1) + made.length;
+    let caret = blocks[afterIdx];
+    if (!caret || isVoid(caret.type)) {
+      caret = { id: uid(), type: 'p', text: '' };
+      blocks.splice(afterIdx, 0, caret);
+    }
+    onChange({ blocks });
+    focusIntent.current = { id: caret.id, pos: 'start' };
+  };
+
+  const activeInsertIndex = () => {
+    const focused = document.activeElement;
+    const fromFocus = focused instanceof Element ? rowIndexFrom(focused) : null;
+    return fromFocus ?? page.blocks.length - 1;
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (!files.length) return;
+    e.preventDefault();
+    const i = activeInsertIndex();
+    const block = page.blocks[i];
+    void insertFiles(files, {
+      index: i,
+      replace: !!block && block.type === 'p' && block.text === '',
+    });
   };
 
   const splitBlock = (i: number) => {
@@ -274,7 +358,7 @@ export default function Editor({ page, onChange }: Props) {
     if (i === 0) return;
 
     const prev = page.blocks[i - 1];
-    if (prev.type === 'divider') {
+    if (isVoid(prev.type)) {
       onChange({ blocks: page.blocks.filter((b) => b.id !== prev.id) });
       focusIntent.current = { id: block.id, pos: 'start' };
       return;
@@ -316,7 +400,7 @@ export default function Editor({ page, onChange }: Props) {
     }
     onChange({ blocks });
     for (let j = i - 1; j >= 0; j--) {
-      if (page.blocks[j].type !== 'divider') {
+      if (!isVoid(page.blocks[j].type)) {
         focusIntent.current = { id: page.blocks[j].id, pos: 'end' };
         return;
       }
@@ -327,7 +411,7 @@ export default function Editor({ page, onChange }: Props) {
 
   const focusNeighbor = (i: number, dir: -1 | 1) => {
     for (let j = i + dir; j >= 0 && j < page.blocks.length; j += dir) {
-      if (page.blocks[j].type !== 'divider') {
+      if (!isVoid(page.blocks[j].type)) {
         focusEl(page.blocks[j].id, dir === -1 ? 'end' : 'start');
         return true;
       }
@@ -495,7 +579,7 @@ export default function Editor({ page, onChange }: Props) {
   const handleTitleKey = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === 'ArrowDown') {
       e.preventDefault();
-      const first = page.blocks.find((b) => b.type !== 'divider');
+      const first = page.blocks.find((b) => !isVoid(b.type));
       if (first) focusEl(first.id, 'start');
       else insertAfter(page.blocks.length - 1);
     }
@@ -582,7 +666,7 @@ export default function Editor({ page, onChange }: Props) {
     setSelRange(null);
     if (focusIndex != null) {
       const b = page.blocks[focusIndex];
-      if (b && b.type !== 'divider') focusIntent.current = { id: b.id, pos: 'end' };
+      if (b && !isVoid(b.type)) focusIntent.current = { id: b.id, pos: 'end' };
     }
   };
 
@@ -603,7 +687,7 @@ export default function Editor({ page, onChange }: Props) {
     }
     onChange({ blocks: rest });
     const target = rest[Math.max(0, a - 1)];
-    if (target && target.type !== 'divider') focusIntent.current = { id: target.id, pos: 'end' };
+    if (target && !isVoid(target.type)) focusIntent.current = { id: target.id, pos: 'end' };
   };
 
   // Write the markdown explicitly rather than trusting the textarea's own
@@ -653,7 +737,8 @@ export default function Editor({ page, onChange }: Props) {
   return (
     <div className="editor-scroll">
       <div
-        className="editor-page"
+        className={`editor-page${fileHover ? ' file-hover' : ''}`}
+        onPaste={handlePaste}
         onMouseDown={(e) => {
           if (e.button !== 0) return;
           if (e.target instanceof Element && e.target.closest('.drag-handle')) return;
@@ -686,6 +771,13 @@ export default function Editor({ page, onChange }: Props) {
           window.getSelection()?.removeAllRanges();
         }}
         onDragOver={(e) => {
+          // Files dragged in from Finder — accept anywhere on the page.
+          if (isExternalFileDrag(e)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            if (!fileHover) setFileHover(true);
+            return;
+          }
           if (!drag) return;
           if (e.target instanceof Element && e.target.closest('.block-row')) return;
           const t = deadZoneTarget(e);
@@ -697,6 +789,17 @@ export default function Editor({ page, onChange }: Props) {
           );
         }}
         onDrop={(e) => {
+          if (e.dataTransfer.files.length) {
+            e.preventDefault();
+            setFileHover(false);
+            const i = rowIndexFrom(e.target) ?? page.blocks.length - 1;
+            const b = page.blocks[i];
+            void insertFiles(e.dataTransfer.files, {
+              index: i,
+              replace: !!b && b.type === 'p' && b.text === '',
+            });
+            return;
+          }
           if (!drag) return;
           if (e.target instanceof Element && e.target.closest('.block-row')) return;
           const t = deadZoneTarget(e);
@@ -705,8 +808,9 @@ export default function Editor({ page, onChange }: Props) {
           handleDrop(t.overIndex, t.after);
         }}
         onDragLeave={(e) => {
-          if (!drag) return;
           if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
+          setFileHover(false);
+          if (!drag) return;
           setDrag((d) => (d && d.overIndex !== -1 ? { ...d, overIndex: -1 } : d));
         }}
       >
@@ -806,6 +910,22 @@ export default function Editor({ page, onChange }: Props) {
         </div>
 
         <div className="editor-tail" onClick={handleTailClick} aria-hidden="true" />
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="file-picker"
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={(e) => {
+            const files = e.target.files;
+            const at = pickTarget.current ?? { index: page.blocks.length - 1, replace: false };
+            pickTarget.current = null;
+            if (files && files.length) void insertFiles(files, at);
+            e.target.value = '';
+          }}
+        />
 
         <textarea
           ref={clipRef}

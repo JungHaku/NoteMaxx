@@ -1,6 +1,65 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
-import { Info } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ExternalLink, Info } from 'lucide-react';
 import { Block } from '../types';
+import { extLabel, formatSize, objectUrl, openFile } from '../files';
+
+function Attachment({ block }: { block: Block }) {
+  const ref = block.file;
+  const [url, setUrl] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    if (!ref) return;
+    if (block.type !== 'image') return;
+    objectUrl(ref.id).then((u) => {
+      if (!alive) return;
+      if (u) setUrl(u);
+      else setMissing(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [ref?.id, block.type]);
+
+  if (!ref) return <div className="block block-file broken">Attachment unavailable</div>;
+
+  if (block.type === 'image') {
+    return (
+      <div className="block block-image">
+        {missing ? (
+          <div className="file-card broken">
+            <span className="file-ext">IMG</span>
+            <span className="file-name">{ref.name} — data missing</span>
+          </div>
+        ) : (
+          <img
+            src={url ?? undefined}
+            alt={ref.name}
+            title={`${ref.name} · ${formatSize(ref.size)}`}
+            onClick={() => openFile(ref)}
+            draggable={false}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="block block-file">
+      <button
+        className="file-card"
+        onClick={() => openFile(ref)}
+        title={`Open ${ref.name}`}
+      >
+        <span className="file-ext">{extLabel(ref)}</span>
+        <span className="file-name">{ref.name}</span>
+        <span className="file-size">{formatSize(ref.size)}</span>
+        <ExternalLink size={13} className="file-open" />
+      </button>
+    </div>
+  );
+}
 
 function autosize(ta: HTMLTextAreaElement | null) {
   if (!ta) return;
@@ -62,6 +121,10 @@ export default function BlockView({
     ro.observe(ta);
     return () => ro.disconnect();
   }, [block.type]);
+
+  if (block.type === 'image' || block.type === 'file') {
+    return <Attachment block={block} />;
+  }
 
   if (block.type === 'divider') {
     return (

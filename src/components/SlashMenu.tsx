@@ -5,7 +5,9 @@ import {
   Heading1,
   Heading2,
   Heading3,
+  Image as ImageIcon,
   Info,
+  Paperclip,
   List,
   ListOrdered,
   Minus,
@@ -34,6 +36,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { type: 'quote', label: 'Quote', keywords: 'blockquote citation', desc: 'Pull quote', icon: <Quote size={14} /> },
   { type: 'callout', label: 'Callout', keywords: 'note warning info highlight banner', desc: 'Highlighted note', icon: <Info size={14} /> },
   { type: 'divider', label: 'Divider', keywords: 'hr separator line rule', desc: 'Horizontal rule', icon: <Minus size={14} /> },
+  { type: 'image', label: 'Image', keywords: 'image picture photo png jpg jpeg screenshot upload', desc: 'Embed a picture', icon: <ImageIcon size={14} /> },
+  { type: 'file', label: 'File', keywords: 'file attachment upload pdf doc docx word excel csv md zip', desc: 'Attach any file', icon: <Paperclip size={14} /> },
 ];
 
 export function filterCommands(q: string): SlashCommand[] {

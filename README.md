@@ -65,6 +65,7 @@ That builds and force-pushes `dist/` to the `gh-pages` branch. (A Pages Actions 
 - **Quick switcher** — ⌘K (or ⌘P) to jump to any page by title or content, or create a page from the query
 - **Block reordering** — drag the ⋮⋮ handle in the left gutter, or ⌘⇧↑ / ⌘⇧↓ to move the current block
 - **Multi-block selection** — drag across blocks (or shift-click, or ⌘A twice) to select whole blocks; ⌘C copies them as Markdown, Backspace deletes them, Escape clears
+- **Images & file attachments** — paste an image, drag files in from Finder, or use `/image` and `/file`. Images render inline; PDFs, Word docs, Markdown, spreadsheets and anything else become a click-to-open card. In the macOS app, clicking opens the file in its real default app (Preview, Word, …). Bytes live in IndexedDB — never localStorage — and orphaned files are cleaned up on startup
 - **Duplicate page** — hover a page in the sidebar and hit the copy icon; full deep copy, independently editable
 - **Copy as Markdown** — topbar button copies the whole page as Markdown (headings, lists, `- [ ]` to-dos, code fences)
 - **Autosave** — debounced to localStorage, ~250ms after last keystroke

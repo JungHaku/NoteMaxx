@@ -43,6 +43,10 @@ function blockToMd(b: Block, num: number): string {
       return prefixLines(b.text, '> **Note:** ', '> ');
     case 'divider':
       return '---';
+    case 'image':
+      return b.file ? `![${b.file.name}](${encodeURI(b.file.name)})` : '';
+    case 'file':
+      return b.file ? `[${b.file.name}](${encodeURI(b.file.name)})` : '';
     default:
       return b.text;
   }

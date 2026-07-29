@@ -130,9 +130,51 @@ func legacyImportScript() -> WKUserScript? {
     return WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true)
 }
 
+// MARK: - Attachments
+//
+// The web app stores attachments in IndexedDB. Opening one means handing the
+// bytes to us: WKWebView can't usefully open a blob: URL, and the point of the
+// feature is that a PDF opens in Preview and a .docx opens in Word. We write the
+// bytes to a per-launch temp directory and let LaunchServices do the rest.
+final class FileOpener: NSObject, WKScriptMessageHandler {
+    static let name = "openFile"
+
+    private lazy var dir: URL = {
+        let d = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NoteMaxx-attachments", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }()
+
+    func userContentController(
+        _ controller: WKUserContentController, didReceive message: WKScriptMessage
+    ) {
+        guard let body = message.body as? [String: Any],
+            let base64 = body["data"] as? String,
+            let data = Data(base64Encoded: base64)
+        else { return }
+
+        // Use only the last path component so a crafted name can't escape the
+        // temp directory.
+        let raw = (body["name"] as? String) ?? "attachment"
+        var name = (raw as NSString).lastPathComponent
+        if name.isEmpty || name == "." || name == ".." { name = "attachment" }
+
+        let target = dir.appendingPathComponent(name)
+        do {
+            try data.write(to: target, options: .atomic)
+        } catch {
+            NSSound.beep()
+            return
+        }
+        NSWorkspace.shared.open(target)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
+    let fileOpener = FileOpener()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let resourceRoot = Bundle.main.resourceURL?.appendingPathComponent("app"),
@@ -146,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let config = WKWebViewConfiguration()
         config.websiteDataStore = WKWebsiteDataStore.default()
         config.setURLSchemeHandler(BundleSchemeHandler(root: resourceRoot), forURLScheme: SCHEME)
+        config.userContentController.add(fileOpener, name: FileOpener.name)
         if let legacyImport = legacyImportScript() {
             config.userContentController.addUserScript(legacyImport)
         }
@@ -198,6 +241,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     @objc func reloadPage(_ sender: Any?) {
         webView.reload()
+    }
+
+    // Without this, <input type="file"> does nothing at all in WKWebView.
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.begin { result in
+            completionHandler(result == .OK ? panel.urls : nil)
+        }
     }
 
     // The web app uses alert()/confirm() (e.g. delete confirmation) — WKWebView

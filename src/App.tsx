@@ -3,6 +3,7 @@ import { ChevronRight, ClipboardCheck, ClipboardCopy, FileText, Menu } from 'luc
 import { Page } from './types';
 import { STORAGE_KEY, loadPages, mergePages, savePages, uid } from './storage';
 import { copyText, pageToMarkdown } from './markdown';
+import { collectGarbage } from './files';
 import { welcomeBlocks } from './templates';
 import Sidebar from './components/Sidebar';
 import Editor from './components/Editor';
@@ -104,6 +105,16 @@ export default function App() {
       window.removeEventListener('pagehide', flush);
       document.removeEventListener('visibilitychange', onVis);
     };
+  }, []);
+
+  // Drop attachment blobs whose blocks are gone (deleted blocks or pages). Runs
+  // once at startup against the persisted pages, so it can't race live edits.
+  useEffect(() => {
+    const referenced = new Set<string>();
+    for (const p of pagesRef.current) {
+      for (const b of p.blocks) if (b.file) referenced.add(b.file.id);
+    }
+    void collectGarbage(referenced);
   }, []);
 
   // Adopt writes from other tabs (page-level last-writer-wins).
